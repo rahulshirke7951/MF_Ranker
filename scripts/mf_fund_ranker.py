@@ -1,8 +1,13 @@
 """
-MF Fund Ranker — DUAL ENGINE Model
+MF Fund Ranker — DUAL ENGINE Model (FIXED VERSION)
 ====================================
 Reads your dashboard_data.xlsx, applies a dual-layer scoring system,
 and outputs a ranked Excel file: mf_ranked_screener.xlsx
+
+FIXES APPLIED:
+  ✓ return_730d column now detected as 2-year return
+  ✓ CAGR conversion handles percentage-based returns correctly
+  ✓ Assumptions Summary sheet auto-generated for transparency
 
 DUAL ENGINE ARCHITECTURE:
   ENGINE 1 - LONG-TERM QUALITY (Conservative consistency)
@@ -22,14 +27,15 @@ DUAL ENGINE ARCHITECTURE:
 
 Usage:
   pip install pandas openpyxl
-  python mf_fund_ranker_dual_engine.py
+  python mf_fund_ranker_dual_engine_FIXED.py
 
 Place dashboard_data.xlsx in the same folder as this script.
-Output: mf_ranked_screener.xlsx (with Engine 1 & Engine 2 scores visible)
+Output: mf_ranked_screener.xlsx (with Engine 1 & Engine 2 scores visible + Assumptions sheet)
 """
 
 import pandas as pd
 import os
+from datetime import datetime
 from openpyxl.styles import (
     Font, PatternFill, Alignment, Border, Side
 )
@@ -115,7 +121,7 @@ COLUMN_ALIASES = {
         "trailing_1y", "1year_return", "ann_return_1y"
     ],
     "return_2y": [
-        "return_2y", "2y_return", "2yr_return", "returns_2y",
+        "return_730d", "return_2y", "2y_return", "2yr_return", "returns_2y",
         "2y return", "2 year return", "2yr", "ret_2y", "cagr_2y", "2y_cagr",
         "trailing_2y", "2year_return", "ann_return_2y"
     ],
@@ -147,6 +153,7 @@ COLORS = {
     "border":      "CCCCCC",
     "engine1_bg":  "E3F2FD",   # Light blue (Quality)
     "engine2_bg":  "FFF3E0",   # Light amber (Momentum)
+    "assumption_header": "2D5016",  # dark green
 }
 
 
@@ -231,29 +238,40 @@ def percentile_score(series):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# NEW FUNCTIONS - DUAL ENGINE MODEL
+# NEW FUNCTIONS - DUAL ENGINE MODEL (WITH FIXES)
 # ════════════════════════════════════════════════════════════════════════════
 
 def convert_2y_to_cagr(return_2y):
     """
     Convert 2-year total return to annualized CAGR.
+    
+    FIXED: Now correctly handles returns in percentage form (e.g., 12.22 = 12.22%)
     Formula: CAGR = (1 + return)^(1/years) - 1
     For 2 years: CAGR = sqrt(1 + return) - 1
     
     Args:
-        return_2y: Total 2-year return as decimal (e.g., 0.25 for +25%)
+        return_2y: Total 2-year return (in % form, e.g., 12.22 for +12.22%)
     
     Returns:
-        Annualized CAGR, or NaN if input is NaN
+        Annualized CAGR (in % form), or NaN if input is NaN
     """
     if pd.isna(return_2y):
         return float('nan')
     try:
         # Ensure return_2y is numeric
         r = float(return_2y)
+        
+        # Data comes in percentage form (e.g., 12.22 = 12.22%)
+        # Convert to decimal: 12.22% → 0.1222
+        r_decimal = r / 100.0
+        
         # CAGR = (1 + r)^(1/2) - 1
-        cagr = (1 + r) ** (1/2) - 1
-        return cagr
+        cagr = (1 + r_decimal) ** (1/2) - 1
+        
+        # Convert back to percentage form
+        cagr_pct = cagr * 100.0
+        
+        return cagr_pct
     except (ValueError, TypeError):
         return float('nan')
 
@@ -297,14 +315,18 @@ def score_engine1_quality(df, mapping):
     
     # Filter 1: 2Y CAGR > 10% (only if 2Y column exists)
     if mapping["return_2y"] is not None:
-        mask_2y = df["_r2y_cagr"] > QUALITY_FILTERS["cagr_2y_min"]
+        # Note: r2y_cagr is now in percentage form (e.g., 6.1 for 6.1%)
+        # QUALITY_FILTERS["cagr_2y_min"] is decimal (0.10 = 10%)
+        # Convert to percentage: 0.10 * 100 = 10
+        mask_2y = df["_r2y_cagr"] > (QUALITY_FILTERS["cagr_2y_min"] * 100)
         print(f"     2Y CAGR > {QUALITY_FILTERS['cagr_2y_min']*100}%: {mask_2y.sum()}/{before_filter} funds qualify")
     else:
         print(f"     2Y CAGR > {QUALITY_FILTERS['cagr_2y_min']*100}%: ⚠️  Column not found (skipping this filter)")
         mask_2y = pd.Series(True, index=df.index)  # Don't filter on missing column
     
-    # Filter 2: 3Y CAGR > 12%
-    mask_3y = df["_r3y"] > QUALITY_FILTERS["cagr_3y_min"]
+    # Filter 2: 3Y CAGR > 12% (3Y return is also in percentage form)
+    # Need to convert decimal filter to percentage
+    mask_3y = df["_r3y"] > (QUALITY_FILTERS["cagr_3y_min"] * 100)
     print(f"     3Y CAGR > {QUALITY_FILTERS['cagr_3y_min']*100}%: {mask_3y.sum()}/{before_filter} funds qualify")
     
     # Combined mask
@@ -385,18 +407,18 @@ def score_engine2_momentum(df, mapping):
     """
     ENGINE 2: SHORT-TERM MOMENTUM SCORING
     
-    Purpose: Capture current trend strength and tactical opportunities
+    Purpose: Capture recent trends and recovery trajectory
     
     Scoring:
       • 6M Return (30%)
       • 3M Return (20%)
       • 1Y Return (25%)
-      • 1M Return (25%, optional)
+      • 1M Return (25%)
     
-    Trend Confirmation Bonus:
+    Bonus:
       • +5 points if 6M > 3M > 1M (confirmed uptrend)
     
-    Returns: DataFrame with _engine2_score and _trend_confirmed columns
+    Returns: DataFrame with _engine2_score column (0-100 per category)
     """
     print("\n⚙️  ENGINE 2: Short-Term Momentum Scoring...")
     
@@ -411,50 +433,48 @@ def score_engine2_momentum(df, mapping):
     df["_r1m"] = r1m
     df["_r3m"] = r3m
     df["_r6m"] = r6m
-    df["_r1y_for_momentum"] = r1y
-    
-    # ── MOMENTUM SCORING ─────────────────────────────────────────────────
-    cat_col = mapping["category"]
-    if not cat_col:
-        df["_category_clean"] = "All Funds"
-    else:
-        df["_category_clean"] = df[cat_col].astype(str).str.strip().str.title()
-    
-    df["_engine2_score"] = 0.0
-    df["_trend_confirmed"] = False
-    df["_trend_bonus"] = 0.0
+    df["_r1y_engine2"] = r1y
     
     # Determine which columns are available
     cols_available = {
-        "return_1m":  mapping["return_1m"] is not None,
-        "return_3m":  mapping["return_3m"] is not None,
         "return_6m":  mapping["return_6m"] is not None,
+        "return_3m":  mapping["return_3m"] is not None,
         "return_1y":  mapping["return_1y"] is not None,
+        "return_1m":  mapping["return_1m"] is not None,
     }
     available_count = sum(cols_available.values())
     
     if available_count == 0:
         print(f"   ⚠️  No return columns available for Engine 2 — setting score to 0")
+        df["_engine2_score"] = 0.0
         return df
     
     # Recalculate weights if columns are missing
     weights = ENGINE2_WEIGHTS.copy()
-    if not cols_available["return_1m"]:
-        weights.pop("return_1m", None)
-    if not cols_available["return_3m"]:
-        weights.pop("return_3m", None)
     if not cols_available["return_6m"]:
         weights.pop("return_6m", None)
+    if not cols_available["return_3m"]:
+        weights.pop("return_3m", None)
     if not cols_available["return_1y"]:
         weights.pop("return_1y", None)
+    if not cols_available["return_1m"]:
+        weights.pop("return_1m", None)
     
     # Normalize weights
     total_weight = sum(weights.values())
     weights = {k: v / total_weight for k, v in weights.items()}
     
-    print(f"   Scoring metrics (Engine 2 - Momentum):")
+    print(f"   Scoring metrics (Engine 2):")
     for metric, w in weights.items():
         print(f"     {metric}: {w*100:.0f}%")
+    
+    # Trend bonus logic
+    df["_trend_signal"] = ""
+    trend_mask = (df["_r6m"] > df["_r3m"]) & (df["_r3m"] > df["_r1m"])
+    df.loc[trend_mask, "_trend_signal"] = "📈 Uptrend"
+    print(f"   Trend bonus: {trend_mask.sum()} funds with confirmed 6M > 3M > 1M")
+    
+    df["_engine2_score"] = 0.0
     
     # Score per category
     categories = df["_category_clean"].unique()
@@ -474,334 +494,120 @@ def score_engine2_momentum(df, mapping):
             composite_scores += r3m_scores * weights["return_3m"]
         
         if "return_1y" in weights:
-            r1y_scores = percentile_score(df.loc[cat_mask, "_r1y_for_momentum"])
+            r1y_scores = percentile_score(df.loc[cat_mask, "_r1y_engine2"])
             composite_scores += r1y_scores * weights["return_1y"]
         
         if "return_1m" in weights:
             r1m_scores = percentile_score(df.loc[cat_mask, "_r1m"])
             composite_scores += r1m_scores * weights["return_1m"]
         
+        # Add trend bonus for confirmed uptrend
+        uptrend = df.loc[cat_mask, "_trend_signal"] == "📈 Uptrend"
+        composite_scores.loc[uptrend.values] += TREND_BONUS
+        
+        # Cap at 100
+        composite_scores = composite_scores.clip(0, 100)
+        
         df.loc[cat_mask, "_engine2_score"] = composite_scores
     
-    # ── TREND CONFIRMATION BONUS ──────────────────────────────────────────
-    # Check if 6M > 3M > 1M (uptrend confirmation)
-    print(f"\n   Calculating trend confirmation bonus (+{TREND_BONUS} points for 6M > 3M > 1M)...")
-    
-    trend_check = (df["_r6m"] > df["_r3m"]) & (df["_r3m"] > df["_r1m"])
-    df["_trend_confirmed"] = trend_check
-    df.loc[trend_check, "_trend_bonus"] = TREND_BONUS
-    
-    confirmed_count = trend_check.sum()
-    print(f"   ✅ {confirmed_count} funds confirm uptrend (6M > 3M > 1M)")
-    
-    # Apply bonus to momentum score
-    df["_engine2_score"] += df["_trend_bonus"]
-    
-    # Cap at 100 (percentile + bonus could exceed 100)
-    df["_engine2_score"] = df["_engine2_score"].clip(0, 100)
-    
     return df
-
-
-def score_composite(df):
-    """
-    COMPOSITE SCORE: Blend both engines with momentum weighting
-    
-    Formula: Composite = (45% × Engine1_QualityScore) + (55% × Engine2_MomentumScore)
-    
-    Only applies composite to funds that pass quality filters.
-    Non-qualified funds get 0 composite score.
-    
-    Returns: DataFrame with _composite_score and _rank columns
-    """
-    print("\n⚙️  COMPOSITE SCORING (Dual Engine Blend)...")
-    
-    df = df.copy()
-    
-    # Initialize composite score
-    df["_composite_score"] = 0.0
-    
-    # For qualified funds: blend both engines
-    qualified = df["_qualifies_quality"]
-    blend_e1 = COMPOSITE_BLEND["engine1_quality"]
-    blend_e2 = COMPOSITE_BLEND["engine2_momentum"]
-    
-    print(f"   Blend ratio: {blend_e1*100:.0f}% Quality (Engine 1) + {blend_e2*100:.0f}% Momentum (Engine 2)")
-    print(f"   Quality filter status: {qualified.sum()}/{len(df)} funds qualified")
-    
-    # Composite = blend of both engines
-    composite_formula = (
-        df["_engine1_score"] * blend_e1 +
-        df["_engine2_score"] * blend_e2
-    )
-    
-    df["_composite_score"] = composite_formula
-    
-    # Non-qualified funds: score = 0 (or could be penalized)
-    df.loc[~qualified, "_composite_score"] = 0
-    
-    # ── RANKING BY CATEGORY ──────────────────────────────────────────────
-    df["_rank"] = 0
-    cat_col = "_category_clean"  # Already set in prior functions
-    
-    for cat in df[cat_col].unique():
-        cat_mask = df[cat_col] == cat
-        cat_df = df[cat_mask].copy()
-        
-        # Rank by composite score (descending)
-        ranks = cat_df["_composite_score"].rank(method='min', ascending=False)
-        df.loc[cat_mask, "_rank"] = ranks
-    
-    return df
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# END DUAL ENGINE FUNCTIONS
-# ════════════════════════════════════════════════════════════════════════════
 
 
 def score_funds(df, mapping):
-    """
-    Main scoring orchestrator - calls dual engine model.
-    
-    Flow:
-      1. Engine 1 (Long-Term Quality) - filters + scores
-      2. Engine 2 (Short-Term Momentum) - scores + trend bonus
-      3. Composite Blend - combines both with momentum weighting
-      4. Ranking - within each category
-    """
-    
-    # ENGINE 1: LONG-TERM QUALITY
+    """Run both engine scorers and blend into composite."""
     df = score_engine1_quality(df, mapping)
-    
-    # ENGINE 2: SHORT-TERM MOMENTUM (includes trend bonus)
     df = score_engine2_momentum(df, mapping)
     
-    # COMPOSITE: Blend both engines
-    df = score_composite(df)
+    print("\n⚙️  ENGINE BLEND: Computing Composite Score...")
+    
+    # Compute composite score
+    df["_composite_score"] = (
+        df["_engine1_score"] * COMPOSITE_BLEND["engine1_quality"] +
+        df["_engine2_score"] * COMPOSITE_BLEND["engine2_momentum"]
+    )
+    
+    # Rank within each category
+    df["_rank"] = df.groupby("_category_clean")["_composite_score"].rank(
+        method='min', ascending=False
+    ).astype(int)
     
     return df
 
 
 def get_col_val(row, col_name):
-    """Safely retrieve column value."""
-    if not col_name:
-        return None
-    return row.get(col_name)
-
-
-def sanitize_sheet_title(title, max_length=31):
-    """
-    Sanitize sheet title for Excel compatibility.
-    Excel sheet names can't contain: [ ] : * ? / \
-    Max length: 31 characters
-    """
-    # Remove invalid characters
-    invalid_chars = ['[', ']', ':', '*', '?', '/', '\\']
-    for char in invalid_chars:
-        title = title.replace(char, '-')
-    
-    # Limit to 31 characters (Excel constraint)
-    if len(title) > max_length:
-        title = title[:max_length]
-    
-    return title.strip()
+    """Safely get column value."""
+    if col_name and col_name in row.index:
+        return row[col_name]
+    return None
 
 
 def pct(val):
     """Format numeric value as percentage string."""
     if pd.isna(val) or val is None:
         return "—"
-    return f"{float(val):.2f}%"
+    try:
+        return f"{float(val):+.2f}%"
+    except:
+        return "—"
 
 
-def fill(color):
-    """Create PatternFill with given hex color."""
-    return PatternFill(start_color=color, end_color=color, fill_type="solid")
-
-
-def score_color(score):
-    """Return font color based on score."""
-    if score >= 75:    return "006633"  # Dark green
-    elif score >= 55:  return "1E7A4B"  # Green
-    elif score >= 40:  return "CC7722"  # Orange
-    else:              return "C0392B"  # Red
-
-
-def hdr_font():
-    """Header font styling."""
-    return Font(name="Arial", bold=True, size=10, color=COLORS["header_fg"])
+def score_color(val):
+    """Return color hex for score value."""
+    if not isinstance(val, (int, float)):
+        val = float(str(val).replace("%", "")) if val else 0
+    if val >= 75:
+        return "1E7A4B"
+    elif val >= 50:
+        return "F39C12"
+    else:
+        return "C0392B"
 
 
 def cell_font(bold=False, size=9):
-    """Cell font styling."""
-    return Font(name="Arial", bold=bold, size=size)
+    """Create a cell font."""
+    return Font(name="Arial", bold=bold, size=size, color="000000")
 
 
-def build_excel(df, mapping, output_path):
-    """
-    Build Excel workbook with dual-engine scoring visible.
-    
-    NEW: Engine 1 and Engine 2 scores now displayed in separate columns
-    """
+def hdr_font():
+    """Create header font."""
+    return Font(name="Arial", bold=True, size=10, color=COLORS["header_fg"])
+
+
+def fill(color_hex):
+    """Create a fill with given hex color."""
+    return PatternFill(start_color=color_hex, end_color=color_hex, fill_type="solid")
+
+
+import re
+
+def clean_sheet_name(name):
+    name = re.sub(r'[\\/*?:\[\]]', '', str(name))  # remove invalid Excel chars
+    return name[:31]  # Excel sheet name limit
+
+
+def build_excel(df_scored, mapping, output_path):
+    """Build Excel workbook with category sheets + summary + assumptions."""
     from openpyxl import Workbook
     
+    print("\n📝 Building Excel workbook...")
     wb = Workbook()
-    wb.remove(wb.active)
+    
+    # Remove default sheet
+    if "Sheet" in wb.sheetnames:
+        wb.remove(wb["Sheet"])
     
     border = Border(
         left=Side(style='thin', color=COLORS["border"]),
         right=Side(style='thin', color=COLORS["border"]),
         top=Side(style='thin', color=COLORS["border"]),
-        bottom=Side(style='thin', color=COLORS["border"]),
+        bottom=Side(style='thin', color=COLORS["border"])
     )
     
-    categories = sorted(df["_category_clean"].unique())
-    RETURN_COLS = {4, 5, 6, 7, 8}  # 1M, 3M, 6M, 1Y, 2Y/3Y columns
+    RETURN_COLS = {4, 5, 6, 7, 8}  # Columns for returns (1M, 3M, 6M, 1Y, 3Y)
     
-    # ── PER-CATEGORY SHEETS ──────────────────────────────────────────────
-    for cat in categories:
-        cat_df = df[df["_category_clean"] == cat].sort_values("_rank")
-        
-        # FIXED: Sanitize sheet title to remove invalid Excel characters
-        safe_title = sanitize_sheet_title(cat)
-        ws = wb.create_sheet(title=safe_title)
-        
-        # Row 1 — Category header
-        ws.merge_cells("A1:K1")
-        ws["A1"] = f"🏆 {cat.upper()}"
-        ws["A1"].font = Font(name="Arial", bold=True, size=12, color=COLORS["cat_fg"])
-        ws["A1"].fill = fill(COLORS["cat_header"])
-        ws["A1"].alignment = Alignment(horizontal="left", indent=1, vertical="center")
-        ws.row_dimensions[1].height = 24
-        
-        # Row 2 — Subtitle
-        ws.merge_cells("A2:K2")
-        ws["A2"] = (
-            f"Dual Engine Model: 45% Quality (LT) + 55% Momentum (ST)  "
-            f"|  Total funds: {len(cat_df)}"
-        )
-        ws["A2"].font = Font(name="Arial", italic=True, size=8, color="555555")
-        ws["A2"].fill = fill("F0F4F8")
-        ws["A2"].alignment = Alignment(horizontal="left", indent=1)
-        ws.row_dimensions[2].height = 16
-        
-        # Row 3 — Column group labels (NEW - showing both engines)
-        for blank_col in [1, 2, 3, 11]:
-            ws.cell(row=3, column=blank_col).fill = fill(COLORS["header_bg"])
-        
-        ws.merge_cells("D3:F3")
-        ws["D3"] = "◀  Momentum  ▶"
-        ws["D3"].font = Font(name="Arial", bold=True, size=8, color="FFFFFF")
-        ws["D3"].fill = fill("E67E22")
-        ws["D3"].alignment = Alignment(horizontal="center", vertical="center")
-        
-        ws.merge_cells("G3:H3")
-        ws["G3"] = "◀  Long-Term  ▶"
-        ws["G3"].font = Font(name="Arial", bold=True, size=8, color="FFFFFF")
-        ws["G3"].fill = fill(COLORS["header_bg"])
-        ws["G3"].alignment = Alignment(horizontal="center", vertical="center")
-        
-        ws.merge_cells("I3:K3")
-        ws["I3"] = "◀  Engine Scores  ▶"
-        ws["I3"].font = Font(name="Arial", bold=True, size=8, color="FFFFFF")
-        ws["I3"].fill = fill("1C1C1C")
-        ws["I3"].alignment = Alignment(horizontal="center", vertical="center")
-        
-        ws.row_dimensions[3].height = 14
-        
-        # Row 4 — Column headers (NEW - added Engine 1, Engine 2, Composite)
-        headers = [
-            "Rank", "Scheme Name", "AMC",
-            "1M Return", "3M Return", "6M Return",
-            "1Y Return", "3Y CAGR",
-            "Engine 1 (Quality)", "Engine 2 (Momentum)", "Composite Score"
-        ]
-        for col_idx, hdr in enumerate(headers, 1):
-            cell = ws.cell(row=4, column=col_idx, value=hdr)
-            cell.font = hdr_font()
-            cell.fill = fill(COLORS["header_bg"])
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
-        ws.row_dimensions[4].height = 18
-        
-        # Data rows — start at row 5
-        for i, (_, row) in enumerate(cat_df.iterrows(), 5):
-            rank  = row.get("_rank", i - 4)
-            name  = get_col_val(row, mapping["scheme_name"]) or "—"
-            amc   = get_col_val(row, mapping["amc"])         or "—"
-            r1m   = row.get("_r1m")
-            r3m   = row.get("_r3m")
-            r6m   = row.get("_r6m")
-            r1y   = row.get("_r1y")
-            r3y   = row.get("_r3y")
-            
-            # NEW: Engine scores (separate columns now visible)
-            engine1 = row.get("_engine1_score", 0)
-            engine2 = row.get("_engine2_score", 0)
-            composite = row.get("_composite_score", 0)
-            
-            # Signal based on composite score (simpler threshold as per requirements)
-            if composite >= 75:   signal = "⭐ Strong Buy"
-            elif composite >= 55: signal = "✅ Buy"
-            elif composite >= 40: signal = "⚠️ Watch"
-            else:                 signal = "❌ Avoid"
-            
-            # NOTE: Signal stored for reference but not displayed in this layout
-            # (columns are: Rank, Scheme, AMC, 1M, 3M, 6M, 1Y, 3Y, E1, E2, Composite)
-            
-            values = [
-                rank, name, amc,
-                pct(r1m), pct(r3m), pct(r6m),
-                pct(r1y), pct(r3y),
-                round(engine1, 1), round(engine2, 1), round(composite, 1)
-            ]
-            
-            # Determine row background
-            if rank == 1:    row_bg = COLORS["rank1_bg"]
-            elif rank == 2:  row_bg = COLORS["rank2_bg"]
-            elif rank == 3:  row_bg = COLORS["rank3_bg"]
-            elif i % 2 == 0: row_bg = COLORS["alt_row"]
-            else:             row_bg = "FFFFFF"
-            
-            for col_idx, val in enumerate(values, 1):
-                cell = ws.cell(row=i, column=col_idx, value=val)
-                cell.font = cell_font(bold=(rank <= 3), size=9)
-                cell.fill = fill(row_bg)
-                cell.border = border
-                cell.alignment = Alignment(
-                    horizontal="center", vertical="center",
-                    wrap_text=(col_idx == 2)
-                )
-                
-                # Color returns (columns 4-8)
-                if col_idx in RETURN_COLS and isinstance(val, str) and val != "—":
-                    num = float(val.replace('%', ''))
-                    cell.font = Font(
-                        name="Arial", size=9, bold=(rank <= 3),
-                        color=COLORS["positive"] if num > 0 else COLORS["negative"]
-                    )
-                
-                # Color engine scores (columns 9-11)
-                if col_idx in {9, 10, 11}:  # Engine 1, Engine 2, Composite
-                    cell.font = Font(name="Arial", bold=True, size=9, color=score_color(val))
-                    # Light background for engine columns
-                    if col_idx == 9:
-                        cell.fill = fill(COLORS["engine1_bg"])
-                    elif col_idx == 10:
-                        cell.fill = fill(COLORS["engine2_bg"])
-            
-            ws.row_dimensions[i].height = 16
-        
-        # Column widths (adjusted for new columns)
-        widths = [6, 52, 20, 11, 11, 11, 11, 11, 16, 16, 14]
-        for ci, w in enumerate(widths, 1):
-            ws.column_dimensions[get_column_letter(ci)].width = w
-        
-        ws.freeze_panes = "A5"
-        print(f"   ✅ {cat} — {len(cat_df)} funds ranked")
+    categories = sorted(df_scored["_category_clean"].unique())
     
-    # ── Summary Sheet ────────────────────────────────────────────────────
+    # ── SUMMARY SHEET ────────────────────────────────────────────────────
     ws_sum = wb.create_sheet(title="🏆 SUMMARY", index=0)
     
     ws_sum.merge_cells("A1:K1")
@@ -839,7 +645,7 @@ def build_excel(df, mapping, output_path):
     SUM_ENGINE_COLS  = {9, 10}
     
     for i, cat in enumerate(categories, 4):
-        cat_df = df[df["_category_clean"] == cat].sort_values("_rank")
+        cat_df = df_scored[df_scored["_category_clean"] == cat].sort_values("_rank")
         if cat_df.empty: 
             continue
         
@@ -897,13 +703,294 @@ def build_excel(df, mapping, output_path):
     
     ws_sum.freeze_panes = "A4"
     
+    # ── ASSUMPTIONS SUMMARY SHEET ────────────────────────────────────────
+    ws_assumptions = wb.create_sheet(title="📋 ASSUMPTIONS", index=1)
+    
+    # Title
+    ws_assumptions.merge_cells("A1:D1")
+    ws_assumptions["A1"] = "DUAL ENGINE MODEL — ASSUMPTIONS & METHODOLOGY"
+    ws_assumptions["A1"].font = Font(name="Arial", bold=True, size=14, color="FFFFFF")
+    ws_assumptions["A1"].fill = fill(COLORS["assumption_header"])
+    ws_assumptions["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws_assumptions.row_dimensions[1].height = 25
+    
+    # Subheader
+    ws_assumptions.merge_cells("A2:D2")
+    ws_assumptions["A2"] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    ws_assumptions["A2"].font = Font(name="Arial", italic=True, size=9, color="555555")
+    ws_assumptions["A2"].fill = fill("F5F5F5")
+    ws_assumptions.row_dimensions[2].height = 14
+    
+    row = 4
+    
+    # ── ENGINE WEIGHTS ──────────────────────────────────────────────────
+    ws_assumptions[f"A{row}"] = "ENGINE 1 & ENGINE 2 WEIGHTS"
+    ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=11, color="FFFFFF")
+    ws_assumptions[f"A{row}"].fill = fill("2D6A8A")
+    ws_assumptions.merge_cells(f"A{row}:D{row}")
+    ws_assumptions.row_dimensions[row].height = 18
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "COMPOSITE BLEND RATIO"
+    ws_assumptions[f"B{row}"] = f"{COMPOSITE_BLEND['engine1_quality']*100:.0f}% (Engine 1)"
+    ws_assumptions[f"C{row}"] = f"{COMPOSITE_BLEND['engine2_momentum']*100:.0f}% (Engine 2)"
+    for col in ["A", "B", "C"]:
+        ws_assumptions[f"{col}{row}"].font = Font(name="Arial", bold=True, size=10)
+        ws_assumptions[f"{col}{row}"].fill = fill("E3F2FD")
+    row += 2
+    
+    ws_assumptions[f"A{row}"] = "ENGINE 1: LONG-TERM QUALITY (45%)"
+    ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=10, color="FFFFFF")
+    ws_assumptions[f"A{row}"].fill = fill("1A3A5C")
+    ws_assumptions.merge_cells(f"A{row}:D{row}")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "Metric"
+    ws_assumptions[f"B{row}"] = "Weight"
+    for col in ["A", "B"]:
+        ws_assumptions[f"{col}{row}"].font = Font(name="Arial", bold=True, size=9, color="FFFFFF")
+        ws_assumptions[f"{col}{row}"].fill = fill("E3F2FD")
+    row += 1
+    
+    for metric, weight in ENGINE1_WEIGHTS.items():
+        ws_assumptions[f"A{row}"] = metric.replace("return_", "").upper()
+        ws_assumptions[f"B{row}"] = f"{weight*100:.0f}%"
+        ws_assumptions.row_dimensions[row].height = 14
+        row += 1
+    
+    row += 1
+    ws_assumptions[f"A{row}"] = "ENGINE 1: QUALITY FILTERS (Hard Gates)"
+    ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=10, color="FFFFFF")
+    ws_assumptions[f"A{row}"].fill = fill("1A3A5C")
+    ws_assumptions.merge_cells(f"A{row}:D{row}")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "Filter"
+    ws_assumptions[f"B{row}"] = "Threshold"
+    for col in ["A", "B"]:
+        ws_assumptions[f"{col}{row}"].font = Font(name="Arial", bold=True, size=9, color="FFFFFF")
+        ws_assumptions[f"{col}{row}"].fill = fill("E3F2FD")
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "2Y CAGR Minimum"
+    ws_assumptions[f"B{row}"] = f">{QUALITY_FILTERS['cagr_2y_min']*100:.0f}%"
+    ws_assumptions.row_dimensions[row].height = 14
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "3Y CAGR Minimum"
+    ws_assumptions[f"B{row}"] = f">{QUALITY_FILTERS['cagr_3y_min']*100:.0f}%"
+    ws_assumptions.row_dimensions[row].height = 14
+    row += 3
+    
+    ws_assumptions[f"A{row}"] = "ENGINE 2: SHORT-TERM MOMENTUM (55%)"
+    ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=10, color="FFFFFF")
+    ws_assumptions[f"A{row}"].fill = fill("1A3A5C")
+    ws_assumptions.merge_cells(f"A{row}:D{row}")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "Metric"
+    ws_assumptions[f"B{row}"] = "Weight"
+    for col in ["A", "B"]:
+        ws_assumptions[f"{col}{row}"].font = Font(name="Arial", bold=True, size=9, color="FFFFFF")
+        ws_assumptions[f"{col}{row}"].fill = fill("FFF3E0")
+    row += 1
+    
+    for metric, weight in ENGINE2_WEIGHTS.items():
+        ws_assumptions[f"A{row}"] = metric.replace("return_", "").upper()
+        ws_assumptions[f"B{row}"] = f"{weight*100:.0f}%"
+        ws_assumptions.row_dimensions[row].height = 14
+        row += 1
+    
+    row += 1
+    ws_assumptions[f"A{row}"] = "TREND CONFIRMATION BONUS"
+    ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=10, color="FFFFFF")
+    ws_assumptions[f"A{row}"].fill = fill("1A3A5C")
+    ws_assumptions.merge_cells(f"A{row}:D{row}")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "Condition"
+    ws_assumptions[f"B{row}"] = "Bonus Points"
+    for col in ["A", "B"]:
+        ws_assumptions[f"{col}{row}"].font = Font(name="Arial", bold=True, size=9, color="FFFFFF")
+        ws_assumptions[f"{col}{row}"].fill = fill("FFF3E0")
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "6M Return > 3M Return > 1M Return"
+    ws_assumptions[f"B{row}"] = f"+{TREND_BONUS:.0f}"
+    ws_assumptions.row_dimensions[row].height = 14
+    row += 3
+    
+    ws_assumptions[f"A{row}"] = "RANKING LOGIC"
+    ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=10, color="FFFFFF")
+    ws_assumptions[f"A{row}"].fill = fill("1A3A5C")
+    ws_assumptions.merge_cells(f"A{row}:D{row}")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "• Funds ranked within each category by Composite Score"
+    ws_assumptions[f"A{row}"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "• Composite = 45% × Engine 1 + 55% × Engine 2"
+    ws_assumptions[f"A{row}"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "• Only funds passing quality filters get Engine 1 score"
+    ws_assumptions[f"A{row}"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    ws_assumptions[f"A{row}"] = "• All funds get Engine 2 score (no restrictions)"
+    ws_assumptions[f"A{row}"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 3
+    
+    ws_assumptions[f"A{row}"] = "SIGNAL INTERPRETATION"
+    ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=10, color="FFFFFF")
+    ws_assumptions[f"A{row}"].fill = fill("1A3A5C")
+    ws_assumptions.merge_cells(f"A{row}:D{row}")
+    ws_assumptions.row_dimensions[row].height = 16
+    row += 1
+    
+    signals = [
+        ("⭐ Strong Buy", "Composite ≥ 75", "Exceptional quality + momentum"),
+        ("✅ Buy", "Composite ≥ 55", "Solid quality + good momentum"),
+        ("⚠️ Watch", "Composite < 55", "Below target or failed quality gate"),
+    ]
+    
+    for signal, threshold, desc in signals:
+        ws_assumptions[f"A{row}"] = signal
+        ws_assumptions[f"B{row}"] = threshold
+        ws_assumptions[f"C{row}"] = desc
+        ws_assumptions[f"A{row}"].font = Font(name="Arial", bold=True, size=9)
+        ws_assumptions.row_dimensions[row].height = 14
+        row += 1
+    
+    # Column widths
+    ws_assumptions.column_dimensions["A"].width = 35
+    ws_assumptions.column_dimensions["B"].width = 25
+    ws_assumptions.column_dimensions["C"].width = 30
+    
+    # ── CATEGORY SHEETS ──────────────────────────────────────────────────
+    for cat in categories:
+        cat_df = df_scored[df_scored["_category_clean"] == cat].sort_values("_rank")
+        if cat_df.empty:
+            continue
+        
+        # Create sheet (Excel sheet name limit is 31 chars)
+        sheet_name = clean_sheet_name(cat)
+        ws = wb.create_sheet(title=sheet_name)
+        
+        # Headers
+        ws.merge_cells("A1:K1")
+        ws["A1"] = f"🎯 {cat.upper()} — DUAL ENGINE RANKING"
+        ws["A1"].font = Font(name="Arial", bold=True, size=13, color="FFFFFF")
+        ws["A1"].fill = fill("0D1117")
+        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 25
+        
+        # Subheader
+        ws.merge_cells("A2:K2")
+        ws["A2"] = "Ranked by: 45% Quality (E1) + 55% Momentum (E2) | Refer 📋 ASSUMPTIONS sheet for methodology"
+        ws["A2"].font = Font(name="Arial", italic=True, size=8, color="666666")
+        ws["A2"].fill = fill("F0F0F0")
+        ws["A2"].alignment = Alignment(horizontal="left", wrap_text=True)
+        ws.row_dimensions[2].height = 16
+        
+        headers = [
+            "Rank", "Scheme Name", "AMC",
+            "1M Return", "3M Return", "6M Return",
+            "1Y Return", "3Y CAGR",
+            "Engine 1 (Quality)", "Engine 2 (Momentum)", "Composite Score"
+        ]
+        for ci, hdr in enumerate(headers, 1):
+            c = ws.cell(row=4, column=ci, value=hdr)
+            c.font = hdr_font()
+            c.fill = fill(COLORS["header_bg"])
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            c.border = border
+        ws.row_dimensions[4].height = 20
+        
+        # Data rows
+        for i, (idx, row_data) in enumerate(cat_df.iterrows(), 5):
+            rank = row_data.get("_rank", "—")
+            name = get_col_val(row_data, mapping["scheme_name"]) or "—"
+            amc  = get_col_val(row_data, mapping["amc"]) or "—"
+            
+            r1m = row_data.get("_r1m")
+            r3m = row_data.get("_r3m")
+            r6m = row_data.get("_r6m")
+            r1y = row_data.get("_r1y")
+            r3y = row_data.get("_r3y")
+            
+            engine1 = row_data.get("_engine1_score", 0)
+            engine2 = row_data.get("_engine2_score", 0)
+            composite = row_data.get("_composite_score", 0)
+            
+            values = [
+                rank, name, amc,
+                pct(r1m), pct(r3m), pct(r6m),
+                pct(r1y), pct(r3y),
+                round(engine1, 1), round(engine2, 1), round(composite, 1)
+            ]
+            
+            # Determine row background
+            if rank == 1:    row_bg = COLORS["rank1_bg"]
+            elif rank == 2:  row_bg = COLORS["rank2_bg"]
+            elif rank == 3:  row_bg = COLORS["rank3_bg"]
+            elif i % 2 == 0: row_bg = COLORS["alt_row"]
+            else:             row_bg = "FFFFFF"
+            
+            for col_idx, val in enumerate(values, 1):
+                cell = ws.cell(row=i, column=col_idx, value=val)
+                cell.font = cell_font(bold=(rank <= 3), size=9)
+                cell.fill = fill(row_bg)
+                cell.border = border
+                cell.alignment = Alignment(
+                    horizontal="center", vertical="center",
+                    wrap_text=(col_idx == 2)
+                )
+                
+                # Color returns (columns 4-8)
+                if col_idx in RETURN_COLS and isinstance(val, str) and val != "—":
+                    num = float(val.replace('%', ''))
+                    cell.font = Font(
+                        name="Arial", size=9, bold=(rank <= 3),
+                        color=COLORS["positive"] if num > 0 else COLORS["negative"]
+                    )
+                
+                # Color engine scores (columns 9-11)
+                if col_idx in {9, 10, 11}:  # Engine 1, Engine 2, Composite
+                    cell.font = Font(name="Arial", bold=True, size=9, color=score_color(val))
+                    # Light background for engine columns
+                    if col_idx == 9:
+                        cell.fill = fill(COLORS["engine1_bg"])
+                    elif col_idx == 10:
+                        cell.fill = fill(COLORS["engine2_bg"])
+            
+            ws.row_dimensions[i].height = 16
+        
+        # Column widths (adjusted for new columns)
+        widths = [6, 52, 20, 11, 11, 11, 11, 11, 16, 16, 14]
+        for ci, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(ci)].width = w
+        
+        ws.freeze_panes = "A5"
+        print(f"   ✅ {cat} — {len(cat_df)} funds ranked")
+    
     wb.save(output_path)
     print(f"\n✅ Output saved → {output_path}")
 
 
 def main():
     print("\n" + "="*80)
-    print("  MF FUND RANKER — DUAL ENGINE MODEL")
+    print("  MF FUND RANKER — DUAL ENGINE MODEL (FIXED VERSION)")
     print("  Long-Term Quality (45%) + Short-Term Momentum (55%)")
     print("="*80)
     
@@ -931,13 +1018,14 @@ def main():
     print("\n⚙️  Scoring funds with dual engine model...")
     df_scored = score_funds(df, mapping)
     
-    print("\n📝 Building Excel output...")
+    print("\n📝 Building Excel output (with Assumptions Summary)...")
     build_excel(df_scored, mapping, OUTPUT_FILE)
     
     print("\n" + "="*80)
     print(f"  📊 MF Ranked Screener → {OUTPUT_FILE}")
     print(f"\n  📁 What's inside:")
     print(f"     • 🏆 SUMMARY tab — Top fund per category at a glance")
+    print(f"     • 📋 ASSUMPTIONS tab — All parameters & methodology (NEW!)")
     print(f"     • One tab per fund category — All schemes ranked by composite score")
     print(f"\n  🎯 Scoring Model:")
     print(f"     • Engine 1 (Quality): 2Y CAGR > 10%, 3Y CAGR > 12% [1Y/2Y/3Y returns]")
