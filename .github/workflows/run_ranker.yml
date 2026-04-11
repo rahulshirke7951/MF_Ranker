@@ -2,8 +2,8 @@ name: Weekly MF Ranker
 
 on:
   schedule:
-    - cron: '30 20 * * 5' 
-    workflow_dispatch:
+    - cron: '30 20 * * 5'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,38 +13,31 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 📥 Checkout repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 🐍 Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 📦 Install dependencies
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
 
-      # ⬇️ Download latest data
       - name: Download data file
         run: |
           python scripts/download_data.py
 
-      # 📊 Run MF Ranker
       - name: Run ranking script
         run: |
           python scripts/mf_fund_ranker.py
 
-      # 📁 Save as constant latest file
       - name: Save latest output
         run: |
           mkdir -p output
           mv mf_ranked_screener.xlsx output/mf_ranked_latest.xlsx
 
-      # 💾 Commit latest file (overwrite every time)
       - name: Commit latest output
         run: |
           git config --global user.name "github-actions"
@@ -54,7 +47,6 @@ jobs:
           git commit -m "📊 Update latest MF ranking" || echo "No changes to commit"
           git push
 
-      # 📤 Upload artifact (backup)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
