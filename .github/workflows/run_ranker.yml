@@ -3,32 +3,67 @@ name: Weekly MF Ranker
 on:
   schedule:
     - cron: '0 4 * * 1'   # Every Monday 4 AM UTC (~9:30 AM IST)
-  workflow_dispatch:      # allows manual run also
+  workflow_dispatch:
 
 jobs:
   run-ranker:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📥 Checkout repo
-        uses: actions/checkout@v3
+      # 📥 Checkout repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
-        uses: actions/setup-python@v4
+      # 🐍 Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Install dependencies
-        run: pip install -r requirements.txt
+      # 📦 Install dependencies
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
 
-      - name: ⬇️ Download latest data
-        run: python scripts/download_data.py
+      # ⬇️ Download latest data
+      - name: Download data file
+        run: |
+          python scripts/download_data.py
 
-      - name: 📊 Run MF Ranker
-        run: python scripts/mf_fund_ranker.py
+      # 📊 Run MF Ranker
+      - name: Run ranking script
+        run: |
+          python scripts/mf_fund_ranker.py
 
-      - name: 📤 Upload Output File
+      # 📁 Move output to folder with date
+      - name: Organize output
+        run: |
+          mkdir -p output
+          DATE=$(date +'%Y-%m-%d')
+          mv mf_ranked_screener.xlsx output/mf_ranked_$DATE.xlsx
+
+      # 💾 Commit output to repo
+      - name: Commit output file
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+
+          git add output/
+          git commit -m "📊 Weekly MF ranking update" || echo "No changes to commit"
+          git push
+
+      # 📤 Upload artifact (backup download option)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mf-ranked-output
-          path: mf_ranked_screener.xlsx
+          path: output/
+
+      # 📧 OPTIONAL: Send email (can disable if not needed)
+      - name: Send Email (Optional)
+        if: false   # 👉 change to true to enable
+        run: |
+          python scripts/send_email.py
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
