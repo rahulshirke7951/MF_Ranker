@@ -5,6 +5,9 @@ on:
     - cron: '0 4 * * 1'   # Every Monday 4 AM UTC (~9:30 AM IST)
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run-ranker:
     runs-on: ubuntu-latest
@@ -35,35 +38,25 @@ jobs:
         run: |
           python scripts/mf_fund_ranker.py
 
-      # 📁 Move output to folder with date
-      - name: Organize output
+      # 📁 Save as constant latest file
+      - name: Save latest output
         run: |
           mkdir -p output
-          DATE=$(date +'%Y-%m-%d')
-          mv mf_ranked_screener.xlsx output/mf_ranked_$DATE.xlsx
+          mv mf_ranked_screener.xlsx output/mf_ranked_latest.xlsx
 
-      # 💾 Commit output to repo
-      - name: Commit output file
+      # 💾 Commit latest file (overwrite every time)
+      - name: Commit latest output
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "actions@github.com"
 
-          git add output/
-          git commit -m "📊 Weekly MF ranking update" || echo "No changes to commit"
+          git add output/mf_ranked_latest.xlsx
+          git commit -m "📊 Update latest MF ranking" || echo "No changes to commit"
           git push
 
-      # 📤 Upload artifact (backup download option)
+      # 📤 Upload artifact (backup)
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mf-ranked-output
-          path: output/
-
-      # 📧 OPTIONAL: Send email (can disable if not needed)
-      - name: Send Email (Optional)
-        if: false   # 👉 change to true to enable
-        run: |
-          python scripts/send_email.py
-        env:
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          name: mf-ranked-latest
+          path: output/mf_ranked_latest.xlsx
